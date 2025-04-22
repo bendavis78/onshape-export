@@ -204,6 +204,7 @@ def export_file(did, wid, eid, config_query_str, config_display_name, format_, o
     # Prepare minimal request body with only required parameters
     body = {
         "formatName": format_upper,
+        "resolution": "fine",
         "storeInDocument": False  # Export to a data file, not as a blob element
     }
     

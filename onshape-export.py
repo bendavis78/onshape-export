@@ -386,6 +386,14 @@ if __name__ == "__main__":
         required=True,
         help="Export format (e.g., STL, STEP). Can be specified multiple times.",
     )
+    parser.add_argument(
+        "-c",
+        "--config",
+        dest="configs",
+        action="append",
+        default=[],
+        help="Configuration parameter override in the form parameterId=value. Can be used multiple times.",
+    )
     args = parser.parse_args()
 
     if not args.formats:
@@ -398,6 +406,75 @@ if __name__ == "__main__":
     part_studio_name = get_part_studio_name(did, wid, eid)
     # print(f"Part Studio: {part_studio_name}")
 
+    # If specific configs are provided via -c, encode and export only those
+    if args.configs:
+        # Build parameters list for encoding API
+        parameters = []
+        for kv in args.configs:
+            if "=" not in kv:
+                print(f"Ignoring invalid -c value: {kv} (expected parameterId=value)")
+                continue
+            pid, val = kv.split("=", 1)
+            # Convert common literals
+            if val.lower() in ("true", "false"):
+                param_value = True if val.lower() == "true" else False
+            else:
+                try:
+                    if "." in val:
+                        param_value = float(val)
+                    else:
+                        param_value = int(val)
+                except ValueError:
+                    param_value = val
+            parameters.append({"parameterId": pid, "parameterValue": param_value})
+
+        if not parameters:
+            print("No valid -c configurations provided; falling back to discovered configurations")
+        else:
+            encode_path = f"/api/v6/elements/d/{did}/e/{eid}/configurationencodings"
+            encode_url = f"{BASE_URL}{encode_path}"
+            headers = HEADERS.copy()
+            try:
+                r = requests.post(
+                    encode_url,
+                    headers=headers,
+                    json={"parameters": parameters},
+                    auth=(ACCESS_KEY, SECRET_KEY),
+                )
+                if r.status_code != 200:
+                    print(f"Failed to encode provided configurations: {r.status_code} {r.text}")
+                    parameters = []
+                else:
+                    enc = r.json()
+                    query_str = enc.get("queryParam", "")
+                    # Display name based on provided overrides
+                    disp_parts = []
+                    for p in parameters:
+                        v = p["parameterValue"]
+                        if isinstance(v, bool):
+                            v_str = "true" if v else "false"
+                        else:
+                            v_str = str(v)
+                        disp_parts.append(f"{p['parameterId']}={v_str}")
+                    display_name = ", ".join(disp_parts) if disp_parts else "Custom"
+                    for fmt in args.formats:
+                        export_file(
+                            did,
+                            wid,
+                            eid,
+                            query_str,
+                            display_name,
+                            fmt,
+                            args.output_dir,
+                            part_studio_name,
+                        )
+                    # Done, exit main
+                    exit(0)
+            except Exception as e:
+                print(f"Error encoding provided configurations: {e}")
+                parameters = []
+
+    # Fall back to discovered configurations
     configs = get_configurations(did, wid, eid)
     for config in configs:
         query_str = config.get("configurationParametersQuery")

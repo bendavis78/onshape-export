@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 
@@ -18,6 +19,28 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
+
+def _request(method, url, **kwargs):
+    verbose = kwargs.pop("verbose", False)
+    if verbose:
+        print(f"\n[{method}] {url}")
+        if "headers" in kwargs:
+            print(" Headers:", json.dumps(kwargs["headers"], indent=2))
+        if "json" in kwargs:
+            print(" JSON:", json.dumps(kwargs["json"], indent=2))
+        if "data" in kwargs:
+            print(" Data:", kwargs["data"])
+        if "params" in kwargs:
+            print(" Params:", kwargs["params"])
+    r = requests.request(method, url, **kwargs)
+    if verbose:
+        print(f" [HTTP {r.status_code}] -> {len(r.content)} bytes received")
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        print(f"❌ API error:\n{e.response.text}", file=sys.stderr)
+        sys.exit(1)
+    return r
 
 def slugify(value, allow_unicode=False):
     value = str(value)
@@ -52,7 +75,7 @@ def parse_url(url):
     return match.groups()  # (did, wid_or_vid, eid)
 
 
-def get_part_studio_name(did, wid, eid):
+def get_part_studio_name(did, wid, eid, verbose=False):
     """Get the name of the part studio element.
 
     Tries multiple API endpoints to retrieve the part studio name.
@@ -64,7 +87,9 @@ def get_part_studio_name(did, wid, eid):
     headers = HEADERS.copy()
 
     try:
-        r = requests.get(url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY))
+        r = _request(
+            "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
+        )
         if r.status_code == 200:
             elements = r.json()
             for element in elements:
@@ -78,7 +103,9 @@ def get_part_studio_name(did, wid, eid):
         path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/metadata"
         url = f"{BASE_URL}{path}"
 
-        r = requests.get(url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY))
+        r = _request(
+            "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
+        )
         if r.status_code == 200:
             metadata = r.json()
             return metadata.get("name", "part")
@@ -90,7 +117,9 @@ def get_part_studio_name(did, wid, eid):
         path = f"/api/v6/elements/d/{did}/w/{wid}/e/{eid}/configuration"
         url = f"{BASE_URL}{path}"
 
-        r = requests.get(url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY))
+        r = _request(
+            "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
+        )
         if r.status_code == 200:
             config_data = r.json()
             if "elementName" in config_data:
@@ -102,7 +131,7 @@ def get_part_studio_name(did, wid, eid):
     return "part"
 
 
-def get_configurations(did, wid, eid):
+def get_configurations(did, wid, eid, verbose=False):
     """Get configurations from a part studio.
 
     This function:
@@ -116,7 +145,9 @@ def get_configurations(did, wid, eid):
 
     headers = HEADERS.copy()
 
-    r = requests.get(url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY))
+    r = _request(
+        "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
+    )
     if r.status_code != 200:
         print(f"Failed to get configurations: {r.status_code} {r.text}")
         return []
@@ -162,11 +193,13 @@ def get_configurations(did, wid, eid):
             encode_path = f"/api/v6/elements/d/{did}/e/{eid}/configurationencodings"
             encode_url = f"{BASE_URL}{encode_path}"
 
-            r = requests.post(
+            r = _request(
+                "POST",
                 encode_url,
                 headers=headers,
                 json=param_map,
                 auth=(ACCESS_KEY, SECRET_KEY),
+                verbose=verbose,
             )
             if r.status_code != 200:
                 print(
@@ -193,6 +226,113 @@ def get_configurations(did, wid, eid):
     return result
 
 
+def export_stl_sync(
+    did,
+    wid,
+    eid,
+    config_query_str,
+    config_display_name,
+    output_dir,
+    part_studio_name=None,
+    stl_resolution=None,
+    verbose=False,
+):
+    format_upper = "STL"
+
+    configuration = None
+    if config_query_str:
+        config_match = re.search(r"configuration=([^&]+)", config_query_str)
+        if config_match:
+            configuration = config_match.group(1)
+
+    print(
+        f"Exporting {format_upper} (sync) for {part_studio_name} {config_display_name}",
+        end="",
+        flush=True,
+    )
+
+    path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/stl"
+    url = f"{BASE_URL}{path}"
+
+    params = {}
+    res = (stl_resolution or "fine").lower()
+    if res not in ("coarse", "medium", "fine"):
+        print(f"Warning: Invalid STL resolution '{res}', defaulting to 'fine'")
+        res = "fine"
+    presets = {
+        "coarse": {
+            "angleTolerance": 12.5,
+            "chordTolerance": 0.00024,
+            "minFacetWidth": 0.000635,
+        },
+        "medium": {
+            "angleTolerance": 6.25,
+            "chordTolerance": 0.00012,
+            "minFacetWidth": 0.000254,
+        },
+        "fine": {
+            "angleTolerance": 2.5,
+            "chordTolerance": 0.00006,
+            "minFacetWidth": 0.0000254,
+        },
+    }
+    params.update(presets[res])
+
+    if configuration:
+        try:
+            import urllib.parse
+
+            decoded_config = urllib.parse.unquote(configuration)
+            params["configuration"] = decoded_config
+        except Exception:
+            params["configuration"] = configuration
+
+    # First request, expect 307 redirect
+    r = _request(
+        "GET",
+        url,
+        headers={"Accept": "application/octet-stream"},
+        params=params,
+        auth=(ACCESS_KEY, SECRET_KEY),
+        allow_redirects=False,
+        verbose=verbose,
+    )
+
+    if r.status_code in (302, 303, 307, 308) and "Location" in r.headers:
+        redirect_url = r.headers["Location"]
+        r = _request(
+            "GET",
+            redirect_url,
+            headers={"Accept": "application/octet-stream"},
+            auth=(ACCESS_KEY, SECRET_KEY),
+            verbose=verbose,
+        )
+
+    if r.status_code != 200:
+        print(
+            f"\n❌ Failed STL sync export: {r.status_code} {r.text[:100]}..."
+            if hasattr(r, "text") and len(r.text) > 100
+            else f"\n❌ Failed STL sync export: {r.status_code}"
+        )
+        return
+
+    # Save the file using the same naming convention
+    names = []
+    if part_studio_name:
+        names.append(part_studio_name)
+        if config_display_name and config_display_name != "Default":
+            names.append(config_display_name)
+    else:
+        names.append(config_display_name)
+
+    name = "-".join(slugify(n) for n in names)
+    filename = os.path.join(output_dir, f"{name}.stl")
+
+    with open(filename, "wb") as f:
+        f.write(r.content)
+    print(f"\n✅ Saved {filename}")
+
+
 def export_file(
     did,
     wid,
@@ -202,6 +342,8 @@ def export_file(
     format_,
     output_dir,
     part_studio_name=None,
+    stl_resolution=None,
+    verbose=False,
 ):
     """Export a file using the asynchronous export API.
 
@@ -233,9 +375,15 @@ def export_file(
     # Prepare minimal request body with only required parameters
     body = {
         "formatName": format_upper,
-        "resolution": "fine",
-        "storeInDocument": False,  # Export to a data file, not as a blob element
+        "storeInDocument": False,
     }
+
+    if format_upper == "STL":
+        res = (stl_resolution or "fine").lower()
+        if res not in ("coarse", "medium", "fine", "veryfine"):
+            print(f"Warning: Invalid STL resolution '{res}', defaulting to 'fine'")
+            res = "fine"
+        body["resolution"] = res
 
     # Add configuration if provided
     if configuration:
@@ -267,8 +415,13 @@ def export_file(
 
     # Create the translation job
     try:
-        r = requests.post(
-            url, json=body, headers=headers, auth=(ACCESS_KEY, SECRET_KEY)
+        r = _request(
+            "POST",
+            url,
+            json=body,
+            headers=headers,
+            auth=(ACCESS_KEY, SECRET_KEY),
+            verbose=verbose,
         )
 
         if r.status_code != 200:
@@ -394,6 +547,18 @@ if __name__ == "__main__":
         default=[],
         help="Configuration parameter override in the form parameterId=value. Can be used multiple times.",
     )
+    parser.add_argument(
+        "--stl-resolution",
+        dest="stl_resolution",
+        choices=["coarse", "medium", "fine"],
+        help="STL mesh resolution. Only applies to STL exports.",
+    )
+    parser.add_argument(
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help="Print verbose API call information.",
+    )
     args = parser.parse_args()
 
     if not args.formats:
@@ -403,7 +568,7 @@ if __name__ == "__main__":
     did, wid, eid = parse_url(args.url)
 
     # Get the part studio name to use in filenames
-    part_studio_name = get_part_studio_name(did, wid, eid)
+    part_studio_name = get_part_studio_name(did, wid, eid, verbose=args.verbose)
     # print(f"Part Studio: {part_studio_name}")
 
     # If specific configs are provided via -c, encode and export only those
@@ -435,11 +600,13 @@ if __name__ == "__main__":
             encode_url = f"{BASE_URL}{encode_path}"
             headers = HEADERS.copy()
             try:
-                r = requests.post(
+                r = _request(
+                    "POST",
                     encode_url,
                     headers=headers,
                     json={"parameters": parameters},
                     auth=(ACCESS_KEY, SECRET_KEY),
+                    verbose=args.verbose,
                 )
                 if r.status_code != 200:
                     print(f"Failed to encode provided configurations: {r.status_code} {r.text}")
@@ -458,16 +625,31 @@ if __name__ == "__main__":
                         disp_parts.append(f"{p['parameterId']}={v_str}")
                     display_name = ", ".join(disp_parts) if disp_parts else "Custom"
                     for fmt in args.formats:
-                        export_file(
-                            did,
-                            wid,
-                            eid,
-                            query_str,
-                            display_name,
-                            fmt,
-                            args.output_dir,
-                            part_studio_name,
-                        )
+                        if fmt.upper() == "STL":
+                            export_stl_sync(
+                                did=did,
+                                wid=wid,
+                                eid=eid,
+                                config_query_str=query_str,
+                                config_display_name=display_name,
+                                output_dir=args.output_dir,
+                                part_studio_name=part_studio_name,
+                                stl_resolution=args.stl_resolution,
+                                verbose=args.verbose,
+                            )
+                        else:
+                            export_file(
+                                did=did,
+                                wid=wid,
+                                eid=eid,
+                                config_query_str=query_str,
+                                config_display_name=display_name,
+                                format_=fmt,
+                                output_dir=args.output_dir,
+                                part_studio_name=part_studio_name,
+                                stl_resolution=args.stl_resolution,
+                                verbose=args.verbose,
+                            )
                     # Done, exit main
                     exit(0)
             except Exception as e:
@@ -475,20 +657,35 @@ if __name__ == "__main__":
                 parameters = []
 
     # Fall back to discovered configurations
-    configs = get_configurations(did, wid, eid)
+    configs = get_configurations(did, wid, eid, verbose=args.verbose)
     for config in configs:
         query_str = config.get("configurationParametersQuery")
         display_name = config.get("configurationDisplay")
         if not display_name:
             continue
         for fmt in args.formats:
-            export_file(
-                did,
-                wid,
-                eid,
-                query_str,
-                display_name,
-                fmt,
-                args.output_dir,
-                part_studio_name,
-            )
+            if fmt.upper() == "STL":
+                export_stl_sync(
+                    did=did,
+                    wid=wid,
+                    eid=eid,
+                    config_query_str=query_str,
+                    config_display_name=display_name,
+                    output_dir=args.output_dir,
+                    part_studio_name=part_studio_name,
+                    stl_resolution=args.stl_resolution,
+                    verbose=args.verbose,
+                )
+            else:
+                export_file(
+                    did=did,
+                    wid=wid,
+                    eid=eid,
+                    config_query_str=query_str,
+                    config_display_name=display_name,
+                    format_=fmt,
+                    output_dir=args.output_dir,
+                    part_studio_name=part_studio_name,
+                    stl_resolution=args.stl_resolution,
+                    verbose=args.verbose,
+                )

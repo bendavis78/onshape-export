@@ -5,7 +5,6 @@ import getpass
 import json
 import os
 import re
-import sys
 import time
 import unicodedata
 
@@ -20,7 +19,7 @@ HEADERS = {
 }
 
 
-def _request(method, url, **kwargs):
+def verbose_request(method, url, **kwargs):
     verbose = kwargs.pop("verbose", False)
     if verbose:
         print(f"\n[{method}] {url}")
@@ -35,11 +34,6 @@ def _request(method, url, **kwargs):
     r = requests.request(method, url, **kwargs)
     if verbose:
         print(f" [HTTP {r.status_code}] -> {len(r.content)} bytes received")
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        print(f"❌ API error:\n{e.response.text}", file=sys.stderr)
-        sys.exit(1)
     return r
 
 def slugify(value, allow_unicode=False):
@@ -87,7 +81,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
     headers = HEADERS.copy()
 
     try:
-        r = _request(
+        r = verbose_request(
             "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
         )
         if r.status_code == 200:
@@ -103,7 +97,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
         path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/metadata"
         url = f"{BASE_URL}{path}"
 
-        r = _request(
+        r = verbose_request(
             "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
         )
         if r.status_code == 200:
@@ -117,7 +111,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
         path = f"/api/v6/elements/d/{did}/w/{wid}/e/{eid}/configuration"
         url = f"{BASE_URL}{path}"
 
-        r = _request(
+        r = verbose_request(
             "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
         )
         if r.status_code == 200:
@@ -145,7 +139,7 @@ def get_configurations(did, wid, eid, verbose=False):
 
     headers = HEADERS.copy()
 
-    r = _request(
+    r = verbose_request(
         "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
     )
     if r.status_code != 200:
@@ -193,7 +187,7 @@ def get_configurations(did, wid, eid, verbose=False):
             encode_path = f"/api/v6/elements/d/{did}/e/{eid}/configurationencodings"
             encode_url = f"{BASE_URL}{encode_path}"
 
-            r = _request(
+            r = verbose_request(
                 "POST",
                 encode_url,
                 headers=headers,
@@ -234,7 +228,7 @@ def export_stl_sync(
     config_display_name,
     output_dir,
     part_studio_name=None,
-    stl_resolution=None,
+    resolution=None,
     verbose=False,
 ):
     format_upper = "STL"
@@ -255,23 +249,40 @@ def export_stl_sync(
     url = f"{BASE_URL}{path}"
 
     params = {}
-    res = (stl_resolution or "fine").lower()
-    if res not in ("coarse", "medium", "fine"):
+    res = (resolution or "fine").lower()
+    if res not in ("coarse", "medium", "fine", "veryfine"):
         print(f"Warning: Invalid STL resolution '{res}', defaulting to 'fine'")
         res = "fine"
+
+    # presets = {
+    #     "coarse": {
+    #         "angleTolerance": 12.5,
+    #         "chordTolerance": 0.00024,
+    #         "minFacetWidth": 0.000635,
+    #     },
+    #     "medium": {
+    #         "angleTolerance": 6.25,
+    #         "chordTolerance": 0.00012,
+    #         "minFacetWidth": 0.000254,
+    #     },
+    #     "fine": {
+    #         "angleTolerance": 2.5,
+    #         "chordTolerance": 0.00006,
+    #         "minFacetWidth": 0.0000254,
+    #     },
+    # }
+
+    # Note: angleTolerance was problematic in testing, causing 400 errors
     presets = {
         "coarse": {
-            "angleTolerance": 12.5,
             "chordTolerance": 0.00024,
             "minFacetWidth": 0.000635,
         },
         "medium": {
-            "angleTolerance": 6.25,
             "chordTolerance": 0.00012,
             "minFacetWidth": 0.000254,
         },
         "fine": {
-            "angleTolerance": 2.5,
             "chordTolerance": 0.00006,
             "minFacetWidth": 0.0000254,
         },
@@ -281,14 +292,13 @@ def export_stl_sync(
     if configuration:
         try:
             import urllib.parse
-
             decoded_config = urllib.parse.unquote(configuration)
             params["configuration"] = decoded_config
         except Exception:
             params["configuration"] = configuration
 
     # First request, expect 307 redirect
-    r = _request(
+    r = verbose_request(
         "GET",
         url,
         headers={"Accept": "application/octet-stream"},
@@ -300,7 +310,7 @@ def export_stl_sync(
 
     if r.status_code in (302, 303, 307, 308) and "Location" in r.headers:
         redirect_url = r.headers["Location"]
-        r = _request(
+        r = verbose_request(
             "GET",
             redirect_url,
             headers={"Accept": "application/octet-stream"},
@@ -342,7 +352,7 @@ def export_file(
     format_,
     output_dir,
     part_studio_name=None,
-    stl_resolution=None,
+    resolution=None,
     verbose=False,
 ):
     """Export a file using the asynchronous export API.
@@ -379,7 +389,7 @@ def export_file(
     }
 
     if format_upper == "STL":
-        res = (stl_resolution or "fine").lower()
+        res = (resolution or "fine").lower()
         if res not in ("coarse", "medium", "fine", "veryfine"):
             print(f"Warning: Invalid STL resolution '{res}', defaulting to 'fine'")
             res = "fine"
@@ -415,7 +425,7 @@ def export_file(
 
     # Create the translation job
     try:
-        r = _request(
+        r = verbose_request(
             "POST",
             url,
             json=body,
@@ -548,8 +558,8 @@ if __name__ == "__main__":
         help="Configuration parameter override in the form parameterId=value. Can be used multiple times.",
     )
     parser.add_argument(
-        "--stl-resolution",
-        dest="stl_resolution",
+        "--resolution",
+        dest="resolution",
         choices=["coarse", "medium", "fine"],
         help="STL mesh resolution. Only applies to STL exports.",
     )
@@ -600,7 +610,7 @@ if __name__ == "__main__":
             encode_url = f"{BASE_URL}{encode_path}"
             headers = HEADERS.copy()
             try:
-                r = _request(
+                r = verbose_request(
                     "POST",
                     encode_url,
                     headers=headers,
@@ -634,7 +644,7 @@ if __name__ == "__main__":
                                 config_display_name=display_name,
                                 output_dir=args.output_dir,
                                 part_studio_name=part_studio_name,
-                                stl_resolution=args.stl_resolution,
+                                resolution=args.resolution,
                                 verbose=args.verbose,
                             )
                         else:
@@ -647,7 +657,7 @@ if __name__ == "__main__":
                                 format_=fmt,
                                 output_dir=args.output_dir,
                                 part_studio_name=part_studio_name,
-                                stl_resolution=args.stl_resolution,
+                                resolution=args.resolution,
                                 verbose=args.verbose,
                             )
                     # Done, exit main
@@ -673,7 +683,7 @@ if __name__ == "__main__":
                     config_display_name=display_name,
                     output_dir=args.output_dir,
                     part_studio_name=part_studio_name,
-                    stl_resolution=args.stl_resolution,
+                    resolution=args.resolution,
                     verbose=args.verbose,
                 )
             else:
@@ -686,6 +696,6 @@ if __name__ == "__main__":
                     format_=fmt,
                     output_dir=args.output_dir,
                     part_studio_name=part_studio_name,
-                    stl_resolution=args.stl_resolution,
+                    resolution=args.resolution,
                     verbose=args.verbose,
                 )

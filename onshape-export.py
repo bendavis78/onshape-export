@@ -62,20 +62,87 @@ def load_credentials():
 ACCESS_KEY, SECRET_KEY = load_credentials()
 
 
-def parse_url(url):
-    match = re.search(r"/documents/([^/]+)/[wv]/([^/]+)/e/([^/?#]+)", url)
+def get_version_id_from_name(did, version_name, verbose=False):
+    """Get version ID from version name.
+
+    Args:
+        did: Document ID
+        version_name: Version name like "v2.4.5" or just "2.4.5"
+        verbose: Print verbose output
+
+    Returns:
+        Version ID (24-character string) or None if not found
+    """
+    # Strip 'v' prefix if present
+    if version_name.startswith("v"):
+        version_name = version_name[1:]
+
+    path = f"/api/v6/documents/d/{did}/versions"
+    url = f"{BASE_URL}{path}"
+
+    headers = HEADERS.copy()
+
+    try:
+        r = verbose_request(
+            "GET", url, headers=headers, auth=(ACCESS_KEY, SECRET_KEY), verbose=verbose
+        )
+        if r.status_code == 200:
+            versions = r.json()
+            # Search for matching version name
+            for version in versions:
+                # Version names in API might be "v2.4.5" or just "2.4.5"
+                api_version_name = version.get("name", "")
+                if api_version_name.startswith("v"):
+                    api_version_name = api_version_name[1:]
+
+                if api_version_name == version_name:
+                    return version.get("id")
+
+            # If exact match not found, try with 'v' prefix
+            for version in versions:
+                if version.get("name", "") == f"v{version_name}":
+                    return version.get("id")
+
+        else:
+            print(f"Failed to get document versions: {r.status_code}")
+    except Exception as e:
+        print(f"Error getting version ID: {e}")
+
+    return None
+
+
+def parse_url(url, version_name=None):
+    """Parse Onshape URL and optionally override with specific version.
+
+    Returns: (did, wvm_id, eid, wvm_type)
+    Where wvm_type is 'w' for workspace or 'v' for version.
+    """
+    match = re.search(r"/documents/([^/]+)/([wv])/([^/]+)/e/([^/?#]+)", url)
     if not match:
         raise ValueError("Invalid Onshape URL format")
-    return match.groups()  # (did, wid_or_vid, eid)
+
+    did, wvm_type, wvm_id, eid = match.groups()
+
+    # Override with version if specified
+    if version_name:
+        # Get the actual version ID from the version name
+        version_id = get_version_id_from_name(did, version_name, verbose=False)
+        if version_id:
+            wvm_type = "v"
+            wvm_id = version_id
+        else:
+            print(f"Warning: Could not find version '{version_name}', using URL as-is")
+
+    return did, wvm_id, eid, wvm_type
 
 
-def get_part_studio_name(did, wid, eid, verbose=False):
+def get_part_studio_name(did, wvm_id, eid, wvm_type="w", verbose=False):
     """Get the name of the part studio element.
 
     Tries multiple API endpoints to retrieve the part studio name.
     """
     # Try using the document elements endpoint
-    path = f"/api/v6/documents/d/{did}/w/{wid}/elements"
+    path = f"/api/v6/documents/d/{did}/{wvm_type}/{wvm_id}/elements"
     url = f"{BASE_URL}{path}"
 
     headers = HEADERS.copy()
@@ -94,7 +161,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
 
     # Try the part studio metadata endpoint
     try:
-        path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/metadata"
+        path = f"/api/v6/partstudios/d/{did}/{wvm_type}/{wvm_id}/e/{eid}/metadata"
         url = f"{BASE_URL}{path}"
 
         r = verbose_request(
@@ -108,7 +175,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
 
     # Try the configuration API as it might contain element metadata
     try:
-        path = f"/api/v6/elements/d/{did}/w/{wid}/e/{eid}/configuration"
+        path = f"/api/v6/elements/d/{did}/{wvm_type}/{wvm_id}/e/{eid}/configuration"
         url = f"{BASE_URL}{path}"
 
         r = verbose_request(
@@ -125,7 +192,7 @@ def get_part_studio_name(did, wid, eid, verbose=False):
     return "part"
 
 
-def get_configurations(did, wid, eid, verbose=False):
+def get_configurations(did, wvm_id, eid, wvm_type="w", verbose=False):
     """Get configurations from a part studio.
 
     This function:
@@ -134,7 +201,7 @@ def get_configurations(did, wid, eid, verbose=False):
     3. Returns a list of configuration objects with query parameters and display names
     """
     # First, get the configuration data
-    path = f"/api/v6/elements/d/{did}/w/{wid}/e/{eid}/configuration"
+    path = f"/api/v6/elements/d/{did}/{wvm_type}/{wvm_id}/e/{eid}/configuration"
     url = f"{BASE_URL}{path}"
 
     headers = HEADERS.copy()
@@ -222,7 +289,7 @@ def get_configurations(did, wid, eid, verbose=False):
 
 def export_stl_sync(
     did,
-    wid,
+    wvm_id,
     eid,
     config_query_str,
     config_display_name,
@@ -230,6 +297,7 @@ def export_stl_sync(
     part_studio_name=None,
     resolution=None,
     units="millimeter",
+    wvm_type="w",
     verbose=False,
 ):
     format_upper = "STL"
@@ -246,7 +314,7 @@ def export_stl_sync(
         flush=True,
     )
 
-    path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/stl"
+    path = f"/api/v6/partstudios/d/{did}/{wvm_type}/{wvm_id}/e/{eid}/stl"
     url = f"{BASE_URL}{path}"
 
     params = {
@@ -348,7 +416,7 @@ def export_stl_sync(
 
 def export_file(
     did,
-    wid,
+    wvm_id,
     eid,
     config_query_str,
     config_display_name,
@@ -357,6 +425,7 @@ def export_file(
     part_studio_name=None,
     resolution=None,
     units="millimeter",
+    wvm_type="w",
     verbose=False,
 ):
     """Export a file using the asynchronous export API.
@@ -379,7 +448,7 @@ def export_file(
     )
 
     # 1. Create the translation job
-    path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/translations"
+    path = f"/api/v6/partstudios/d/{did}/{wvm_type}/{wvm_id}/e/{eid}/translations"
     url = f"{BASE_URL}{path}"
 
     headers = HEADERS.copy()
@@ -574,16 +643,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Print verbose API call information.",
     )
+    parser.add_argument(
+        "-v",
+        "--version",
+        dest="version_name",
+        help="Version name to export (e.g., 'v2.4.5' or '2.4.5'). Overrides the version in the URL.",
+    )
     args = parser.parse_args()
 
     if not args.formats:
         parser.error("At least one -f/--format must be specified")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    did, wid, eid = parse_url(args.url)
+    did, wvm_id, eid, wvm_type = parse_url(args.url, args.version_name)
 
     # Get the part studio name to use in filenames
-    part_studio_name = get_part_studio_name(did, wid, eid, verbose=args.verbose)
+    part_studio_name = get_part_studio_name(
+        did, wvm_id, eid, wvm_type=wvm_type, verbose=args.verbose
+    )
     # print(f"Part Studio: {part_studio_name}")
 
     # If specific configs are provided via -c, encode and export only those
@@ -643,19 +720,20 @@ if __name__ == "__main__":
                         if fmt.upper() == "STL":
                             export_stl_sync(
                                 did=did,
-                                wid=wid,
+                                wvm_id=wvm_id,
                                 eid=eid,
                                 config_query_str=query_str,
                                 config_display_name=display_name,
                                 output_dir=args.output_dir,
                                 part_studio_name=part_studio_name,
                                 resolution=args.resolution,
+                                wvm_type=wvm_type,
                                 verbose=args.verbose,
                             )
                         else:
                             export_file(
                                 did=did,
-                                wid=wid,
+                                wvm_id=wvm_id,
                                 eid=eid,
                                 config_query_str=query_str,
                                 config_display_name=display_name,
@@ -663,6 +741,7 @@ if __name__ == "__main__":
                                 output_dir=args.output_dir,
                                 part_studio_name=part_studio_name,
                                 resolution=args.resolution,
+                                wvm_type=wvm_type,
                                 verbose=args.verbose,
                             )
                     # Done, exit main
@@ -672,7 +751,9 @@ if __name__ == "__main__":
                 parameters = []
 
     # Fall back to discovered configurations
-    configs = get_configurations(did, wid, eid, verbose=args.verbose)
+    configs = get_configurations(
+        did, wvm_id, eid, wvm_type=wvm_type, verbose=args.verbose
+    )
     for config in configs:
         query_str = config.get("configurationParametersQuery")
         display_name = config.get("configurationDisplay")
@@ -682,19 +763,20 @@ if __name__ == "__main__":
             if fmt.upper() == "STL":
                 export_stl_sync(
                     did=did,
-                    wid=wid,
+                    wvm_id=wvm_id,
                     eid=eid,
                     config_query_str=query_str,
                     config_display_name=display_name,
                     output_dir=args.output_dir,
                     part_studio_name=part_studio_name,
                     resolution=args.resolution,
+                    wvm_type=wvm_type,
                     verbose=args.verbose,
                 )
             else:
                 export_file(
                     did=did,
-                    wid=wid,
+                    wvm_id=wvm_id,
                     eid=eid,
                     config_query_str=query_str,
                     config_display_name=display_name,
@@ -702,5 +784,6 @@ if __name__ == "__main__":
                     output_dir=args.output_dir,
                     part_studio_name=part_studio_name,
                     resolution=args.resolution,
+                    wvm_type=wvm_type,
                     verbose=args.verbose,
                 )

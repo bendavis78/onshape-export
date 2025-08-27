@@ -229,6 +229,7 @@ def export_stl_sync(
     output_dir,
     part_studio_name=None,
     resolution=None,
+    units="millimeter",
     verbose=False,
 ):
     format_upper = "STL"
@@ -248,7 +249,9 @@ def export_stl_sync(
     path = f"/api/v6/partstudios/d/{did}/w/{wid}/e/{eid}/stl"
     url = f"{BASE_URL}{path}"
 
-    params = {}
+    params = {
+        "units": units,
+    }
     res = (resolution or "fine").lower()
     if res not in ("coarse", "medium", "fine", "veryfine"):
         print(f"Warning: Invalid STL resolution '{res}', defaulting to 'fine'")
@@ -320,8 +323,8 @@ def export_stl_sync(
 
     if r.status_code != 200:
         print(
-            f"\n❌ Failed STL sync export: {r.status_code} {r.text[:100]}..."
-            if hasattr(r, "text") and len(r.text) > 100
+            f"\n❌ Failed STL sync export: {r.status_code}\n{r.text}..."
+            if hasattr(r, "text")
             else f"\n❌ Failed STL sync export: {r.status_code}"
         )
         return
@@ -353,6 +356,7 @@ def export_file(
     output_dir,
     part_studio_name=None,
     resolution=None,
+    units="millimeter",
     verbose=False,
 ):
     """Export a file using the asynchronous export API.
@@ -386,6 +390,7 @@ def export_file(
     body = {
         "formatName": format_upper,
         "storeInDocument": False,
+        "unit": units,
     }
 
     if format_upper == "STL":
